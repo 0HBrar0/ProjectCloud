@@ -5,11 +5,11 @@ import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, scrolledtext
+from PIL import Image, ImageTk
 
-# Use a configuration file to persist settings
 CONFIG_FILE = "config.ini"
 
-# Conversion factors for backup interval
+# Conversion factors from unit to milliseconds
 TIME_CONVERSIONS = {
     "Seconds": 1000,
     "Minutes": 60000,
@@ -17,26 +17,32 @@ TIME_CONVERSIONS = {
     "Days": 86400000
 }
 
-# Set CustomTkinter appearance and theme
-ctk.set_appearance_mode("dark")  # Options: "dark", "light", "system"
-ctk.set_default_color_theme("blue")  # You can choose "blue", "green", "dark-blue", etc.
-
 
 class S3BackupApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("S3Sync")
-        self.geometry("800x600")
+        self.geometry("850x650")
         self.resizable(True, True)
 
-        # Create a main frame with padding
+        # Set custom icon from a JPG file (convert using PIL)
+        try:
+            img = Image.open("icon.jpg")  # Ensure icon.jpg exists in the same directory
+            photo = ImageTk.PhotoImage(img)
+            self.iconphoto(False, photo)
+        except Exception as e:
+            print("Error loading icon.jpg:", e)
+
+        # Create main frame with padding
         self.main_frame = ctk.CTkFrame(self)
         self.main_frame.pack(padx=20, pady=20, fill="both", expand=True)
 
-        # Create a grid inside main_frame
-        self.main_frame.columnconfigure(1, weight=1)
-        for i in range(15):
-            self.main_frame.rowconfigure(i, weight=1)
+        # Configure grid for autoscaling
+        self.main_frame.grid_columnconfigure(0, weight=1)
+        self.main_frame.grid_columnconfigure(1, weight=3)
+        self.main_frame.grid_columnconfigure(2, weight=1)
+        for i in range(16):
+            self.main_frame.grid_rowconfigure(i, weight=1)
 
         # AWS Credentials
         ctk.CTkLabel(self.main_frame, text="AWS Access Key ID:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
@@ -62,18 +68,20 @@ class S3BackupApp(ctk.CTk):
         self.backup_dir = ctk.StringVar()
         self.entry_backup_dir = ctk.CTkEntry(self.main_frame, textvariable=self.backup_dir, width=300)
         self.entry_backup_dir.grid(row=4, column=1, padx=5, pady=5)
-        self.btn_select_backup = ctk.CTkButton(self.main_frame, text="Select Directory",
-                                               command=self.select_backup_directory)
-        self.btn_select_backup.grid(row=4, column=2, padx=5, pady=5)
+        ctk.CTkButton(self.main_frame, text="Select Directory", command=self.select_backup_directory).grid(row=4,
+                                                                                                           column=2,
+                                                                                                           padx=5,
+                                                                                                           pady=5)
 
         # Restore Directory
         ctk.CTkLabel(self.main_frame, text="Local Restore Directory:").grid(row=5, column=0, sticky="w", padx=5, pady=5)
         self.restore_dir = ctk.StringVar()
         self.entry_restore_dir = ctk.CTkEntry(self.main_frame, textvariable=self.restore_dir, width=300)
         self.entry_restore_dir.grid(row=5, column=1, padx=5, pady=5)
-        self.btn_select_restore = ctk.CTkButton(self.main_frame, text="Select Directory",
-                                                command=self.select_restore_directory)
-        self.btn_select_restore.grid(row=5, column=2, padx=5, pady=5)
+        ctk.CTkButton(self.main_frame, text="Select Directory", command=self.select_restore_directory).grid(row=5,
+                                                                                                            column=2,
+                                                                                                            padx=5,
+                                                                                                            pady=5)
 
         # Backup Interval and Unit
         ctk.CTkLabel(self.main_frame, text="Backup Interval:").grid(row=6, column=0, sticky="w", padx=5, pady=5)
@@ -83,7 +91,7 @@ class S3BackupApp(ctk.CTk):
         self.interval_unit = ctk.StringVar(value="Minutes")
         self.unit_menu = ctk.CTkOptionMenu(self.main_frame, variable=self.interval_unit,
                                            values=["Seconds", "Minutes", "Hours", "Days"])
-        self.unit_menu.grid(row=6, column=2, padx=5, pady=5)
+        self.unit_menu.grid(row=6, column=2, padx=5, pady=5, sticky="w")
 
         # Action Buttons
         self.btn_backup_now = ctk.CTkButton(self.main_frame, text="Start Backup Now", command=self.start_backup_thread)
@@ -103,11 +111,16 @@ class S3BackupApp(ctk.CTk):
         self.btn_save_config = ctk.CTkButton(self.main_frame, text="Save Settings", command=self.save_config)
         self.btn_save_config.grid(row=11, column=0, columnspan=3, pady=5)
 
-        # Log Output - using a scrolled text widget
-        ctk.CTkLabel(self.main_frame, text="Log Output:").grid(row=12, column=0, sticky="w", padx=5, pady=5)
+        # Progress Bar
+        self.progress_bar = ctk.CTkProgressBar(self.main_frame, width=300)
+        self.progress_bar.grid(row=12, column=0, columnspan=3, padx=5, pady=5)
+        self.progress_bar.set(0)
+
+        # Log Output (ScrolledText)
+        ctk.CTkLabel(self.main_frame, text="Log Output:").grid(row=13, column=0, sticky="w", padx=5, pady=5)
         self.log_text = scrolledtext.ScrolledText(self.main_frame, width=70, height=10, state="disabled", bg="#1f1f1f",
                                                   fg="white")
-        self.log_text.grid(row=13, column=0, columnspan=3, padx=5, pady=5)
+        self.log_text.grid(row=14, column=0, columnspan=3, padx=5, pady=5)
 
         self.scheduled_job = None
 
@@ -150,16 +163,33 @@ class S3BackupApp(ctk.CTk):
         s3 = self.get_s3_client()
         if s3 is None:
             return
+
+        # Gather all files and calculate total size
+        total_size = 0
+        file_list = []
         for root, dirs, files in os.walk(local_dir):
             for file in files:
                 full_path = os.path.join(root, file)
+                total_size += os.path.getsize(full_path)
                 rel_path = os.path.relpath(full_path, local_dir)
-                s3_key = os.path.join(prefix, rel_path).replace("\\", "/")
-                try:
-                    s3.upload_file(full_path, bucket, s3_key)
-                    self.log(f"Uploaded {full_path} to s3://{bucket}/{s3_key}")
-                except (NoCredentialsError, ClientError) as e:
-                    self.log(f"Error uploading {full_path}: {e}")
+                file_list.append((full_path, rel_path))
+        self.total_size = total_size
+        self.bytes_uploaded = 0
+        self.progress_bar.set(0)
+
+        def progress_callback(bytes_amount):
+            self.bytes_uploaded += bytes_amount
+            progress_value = self.bytes_uploaded / self.total_size if self.total_size > 0 else 0
+            self.progress_bar.set(progress_value)
+            self.update_idletasks()
+
+        for full_path, rel_path in file_list:
+            s3_key = os.path.join(prefix, rel_path).replace("\\", "/")
+            try:
+                s3.upload_file(full_path, bucket, s3_key, Callback=progress_callback)
+                self.log(f"Uploaded {full_path} to s3://{bucket}/{s3_key}")
+            except (NoCredentialsError, ClientError) as e:
+                self.log(f"Error uploading {full_path}: {e}")
 
     def restore_backup(self, bucket, base_prefix="backup/"):
         s3 = self.get_s3_client()
@@ -172,22 +202,35 @@ class S3BackupApp(ctk.CTk):
         computer_folder = self.computer_id.get().strip() or "Default"
         prefix = os.path.join(base_prefix, computer_folder) + "/"
         paginator = s3.get_paginator('list_objects_v2')
-        try:
-            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-                if 'Contents' in page:
-                    for obj in page['Contents']:
-                        s3_key = obj['Key']
-                        rel_path = os.path.relpath(s3_key, prefix)
-                        local_file_path = os.path.join(restore_dir, rel_path)
-                        os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
-                        try:
-                            s3.download_file(bucket, s3_key, local_file_path)
-                            self.log(f"Downloaded {s3_key} to {local_file_path}")
-                        except Exception as e:
-                            self.log(f"Error downloading {s3_key}: {e}")
-            messagebox.showinfo("Restore", "Restore completed successfully!")
-        except Exception as e:
-            messagebox.showerror("Restore Error", str(e))
+
+        # Gather all objects and compute total download size
+        total_download_size = 0
+        object_list = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    total_download_size += obj['Size']
+                    object_list.append((obj['Key'], obj['Size']))
+        self.total_download_size = total_download_size
+        self.bytes_downloaded = 0
+        self.progress_bar.set(0)
+
+        def download_progress_callback(bytes_amount):
+            self.bytes_downloaded += bytes_amount
+            progress_value = self.bytes_downloaded / self.total_download_size if self.total_download_size > 0 else 0
+            self.progress_bar.set(progress_value)
+            self.update_idletasks()
+
+        for s3_key, size in object_list:
+            rel_path = os.path.relpath(s3_key, prefix)
+            local_file_path = os.path.join(restore_dir, rel_path)
+            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+            try:
+                s3.download_file(bucket, s3_key, local_file_path, Callback=download_progress_callback)
+                self.log(f"Downloaded {s3_key} to {local_file_path}")
+            except Exception as e:
+                self.log(f"Error downloading {s3_key}: {e}")
+        messagebox.showinfo("Restore", "Restore completed successfully!")
 
     def start_backup_thread(self):
         threading.Thread(target=self.run_backup, daemon=True).start()
