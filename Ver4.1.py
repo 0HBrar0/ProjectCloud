@@ -2,6 +2,7 @@ import os
 import threading
 import configparser
 import boto3
+import hashlib
 from botocore.exceptions import NoCredentialsError, ClientError
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, scrolledtext
@@ -9,7 +10,6 @@ from PIL import Image, ImageTk
 
 CONFIG_FILE = "config.ini"
 
-# Conversion factors from unit to milliseconds
 TIME_CONVERSIONS = {
     "Seconds": 1000,
     "Minutes": 60000,
@@ -25,19 +25,15 @@ class S3BackupApp(ctk.CTk):
         self.geometry("850x650")
         self.resizable(True, True)
 
-        # Set custom icon from a JPG file (convert using PIL)
         try:
-            img = Image.open("icon.jpg")  # Ensure icon.jpg exists in the same directory
+            img = Image.open("icon.jpg")
             photo = ImageTk.PhotoImage(img)
             self.iconphoto(False, photo)
         except Exception as e:
             print("Error loading icon.jpg:", e)
 
-        # Create main frame with padding
         self.main_frame = ctk.CTkFrame(self)
         self.main_frame.pack(padx=20, pady=20, fill="both", expand=True)
-
-        # Configure grid for autoscaling
         self.main_frame.grid_columnconfigure(0, weight=1)
         self.main_frame.grid_columnconfigure(1, weight=3)
         self.main_frame.grid_columnconfigure(2, weight=1)
@@ -116,16 +112,22 @@ class S3BackupApp(ctk.CTk):
         self.progress_bar.grid(row=12, column=0, columnspan=3, padx=5, pady=5)
         self.progress_bar.set(0)
 
-        # Log Output (ScrolledText)
+        # Log Output
         ctk.CTkLabel(self.main_frame, text="Log Output:").grid(row=13, column=0, sticky="w", padx=5, pady=5)
         self.log_text = scrolledtext.ScrolledText(self.main_frame, width=70, height=10, state="disabled", bg="#1f1f1f",
                                                   fg="white")
         self.log_text.grid(row=14, column=0, columnspan=3, padx=5, pady=5)
 
         self.scheduled_job = None
-
-        # Load configuration if available
         self.load_config()
+
+    def compute_md5(self, file_path):
+        """Compute MD5 hash of a file."""
+        hash_md5 = hashlib.md5()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(4096), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
 
     def log(self, message):
         self.log_text.config(state="normal")
@@ -164,7 +166,6 @@ class S3BackupApp(ctk.CTk):
         if s3 is None:
             return
 
-        # Gather all files and calculate total size
         total_size = 0
         file_list = []
         for root, dirs, files in os.walk(local_dir):
@@ -185,8 +186,31 @@ class S3BackupApp(ctk.CTk):
 
         for full_path, rel_path in file_list:
             s3_key = os.path.join(prefix, rel_path).replace("\\", "/")
+            local_md5 = self.compute_md5(full_path)
+
             try:
-                s3.upload_file(full_path, bucket, s3_key, Callback=progress_callback)
+                response = s3.head_object(Bucket=bucket, Key=s3_key)
+                s3_md5 = response['Metadata'].get('file_md5', None)
+
+                if s3_md5 == local_md5:
+                    self.log(f"Skipping {full_path} (no changes detected)")
+                    self.bytes_uploaded += os.path.getsize(full_path)
+                    progress_callback(0)
+                    continue
+
+            except ClientError as e:
+                if e.response['Error']['Code'] != '404':
+                    self.log(f"Error checking {s3_key}: {e}")
+                    continue
+
+            try:
+                s3.upload_file(
+                    full_path,
+                    bucket,
+                    s3_key,
+                    ExtraArgs={'Metadata': {'file_md5': local_md5}},
+                    Callback=progress_callback
+                )
                 self.log(f"Uploaded {full_path} to s3://{bucket}/{s3_key}")
             except (NoCredentialsError, ClientError) as e:
                 self.log(f"Error uploading {full_path}: {e}")
@@ -203,7 +227,6 @@ class S3BackupApp(ctk.CTk):
         prefix = os.path.join(base_prefix, computer_folder) + "/"
         paginator = s3.get_paginator('list_objects_v2')
 
-        # Gather all objects and compute total download size
         total_download_size = 0
         object_list = []
         for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
