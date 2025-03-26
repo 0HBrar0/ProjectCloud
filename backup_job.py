@@ -6,7 +6,7 @@ from plyer import notification
 import logging
 import time
 
-CONFIG_FILE = "E:\CLOUD PROJECT\Project Cloud\.venv\scheduling back\config.ini"
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
 
 def get_s3_client(access_key, secret_key):
     return boto3.client(
@@ -79,7 +79,7 @@ def load_config():
             aws_secret_key = settings.get("aws_secret_key", "")
             bucket_name = settings.get("bucket_name", "")
             computer_id = settings.get("computer_id", "Default")
-            backup_dir = settings.get("backup_directory", "")
+            backup_dir = settings.get("backup_dir", "")
             return aws_access_key, aws_secret_key, bucket_name, computer_id, backup_dir
     return None, None, None, None, None
 
