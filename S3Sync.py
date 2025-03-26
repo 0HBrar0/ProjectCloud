@@ -1,18 +1,19 @@
 import os
+import sys
 import threading
 import configparser
 import boto3
 import hashlib
-import sys
-from botocore.exceptions import NoCredentialsError, ClientError
-import customtkinter as ctk
-from tkinter import filedialog, messagebox, scrolledtext
-from tkcalendar import Calendar
-from datetime import datetime
+import logging
+import time
 import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import ttk
+from tkcalendar import Calendar
+import customtkinter as ctk
 
 # Constants
-CONFIG_FILE = "config.ini"
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
 DEFAULT_TASK_NAME = "S3BackupJob"
 
 def get_default_python_path():
@@ -23,6 +24,17 @@ def get_default_python_path():
 def get_default_script_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "backup_job.py")
 
+def compute_md5(file_path):
+    """Compute MD5 hash of the file."""
+    hash_md5 = hashlib.md5()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
+
+# ---------------------------
+# Existing Backup Tab
+# ---------------------------
 class BackupFrame(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -80,11 +92,22 @@ class BackupFrame(ctk.CTkFrame):
             btn_frame.grid_columnconfigure(idx, weight=1)
 
         # Progress and Logs
-        self.progress_bar = ctk.CTkProgressBar(main_frame, width=300)
-        self.progress_bar.grid(row=3, column=0, pady=10)
+        progress_frame = ctk.CTkFrame(main_frame)
+        progress_frame.grid(row=3, column=0, pady=10, sticky="ew")
+        self.progress_bar = ctk.CTkProgressBar(progress_frame, width=300)
+        self.progress_bar.grid(row=0, column=0, padx=(5, 2))
         self.progress_bar.set(0)
+        self.progress_label = ctk.CTkLabel(progress_frame, text="0%")
+        self.progress_label.grid(row=0, column=1, padx=(2, 5))
         self.log_text = scrolledtext.ScrolledText(main_frame, width=100, height=12, state="disabled")
         self.log_text.grid(row=4, column=0, pady=5, sticky="nsew")
+
+    def update_progress(self, current, total):
+        progress_value = current / total if total > 0 else 0
+        self.progress_bar.set(progress_value)
+        percentage = int(progress_value * 100)
+        self.progress_label.configure(text=f"{percentage}%")
+        self.update_idletasks()
 
     def log(self, message):
         self.log_text.config(state="normal")
@@ -114,13 +137,6 @@ class BackupFrame(ctk.CTkFrame):
             return None
         return boto3.client('s3', aws_access_key_id=access_key, aws_secret_access_key=secret_key)
 
-    def compute_md5(self, file_path):
-        hash_md5 = hashlib.md5()
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_md5.update(chunk)
-        return hash_md5.hexdigest()
-
     def backup_directory(self):
         local_dir = self.backup_dir_entry.get()
         bucket = self.entry_bucket.get().strip()
@@ -147,16 +163,15 @@ class BackupFrame(ctk.CTkFrame):
         self.total_size = total_size
         self.bytes_uploaded = 0
         self.progress_bar.set(0)
+        self.progress_label.configure(text="0%")
 
         def progress_callback(bytes_amount):
             self.bytes_uploaded += bytes_amount
-            progress_value = self.bytes_uploaded / self.total_size if self.total_size > 0 else 0
-            self.progress_bar.set(progress_value)
-            self.update_idletasks()
+            self.update_progress(self.bytes_uploaded, self.total_size)
 
         for full_path, rel_path in file_list:
             s3_key = os.path.join(prefix, rel_path).replace("\\", "/")
-            local_md5 = self.compute_md5(full_path)
+            local_md5 = compute_md5(full_path)
 
             try:
                 response = s3.head_object(Bucket=bucket, Key=s3_key)
@@ -164,12 +179,11 @@ class BackupFrame(ctk.CTkFrame):
                 if s3_md5 == local_md5:
                     self.log(f"Skipping {full_path} (no changes)")
                     self.bytes_uploaded += os.path.getsize(full_path)
-                    progress_callback(0)
+                    self.update_progress(self.bytes_uploaded, self.total_size)
                     continue
-            except ClientError as e:
-                if e.response['Error']['Code'] != '404':
-                    self.log(f"Error checking {s3_key}: {e}")
-                    continue
+            except Exception as e:
+                # Continue if file not found
+                pass
 
             try:
                 s3.upload_file(
@@ -207,19 +221,18 @@ class BackupFrame(ctk.CTkFrame):
                     for obj in page['Contents']:
                         total_download_size += obj['Size']
                         object_list.append((obj['Key'], obj['Size']))
-        except ClientError as e:
+        except Exception as e:
             self.log(f"Error listing objects: {e}")
             return
 
         self.total_download_size = total_download_size
         self.bytes_downloaded = 0
         self.progress_bar.set(0)
+        self.progress_label.configure(text="0%")
 
         def download_progress_callback(bytes_amount):
             self.bytes_downloaded += bytes_amount
-            progress_value = self.bytes_downloaded / self.total_download_size if self.total_download_size > 0 else 0
-            self.progress_bar.set(progress_value)
-            self.update_idletasks()
+            self.update_progress(self.bytes_downloaded, self.total_download_size)
 
         for s3_key, size in object_list:
             rel_path = os.path.relpath(s3_key, prefix)
@@ -292,6 +305,9 @@ class BackupFrame(ctk.CTkFrame):
         self.log("Configuration saved")
         messagebox.showinfo("Success", "Settings saved successfully")
 
+# ---------------------------
+# Existing Schedule Tab
+# ---------------------------
 class ScheduleFrame(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
@@ -300,7 +316,6 @@ class ScheduleFrame(ctk.CTkFrame):
     def create_widgets(self):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
-
         main_frame = ctk.CTkFrame(self)
         main_frame.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
         main_frame.grid_columnconfigure(0, weight=1)
@@ -340,17 +355,15 @@ class ScheduleFrame(ctk.CTkFrame):
     def create_task(self):
         schedule = self.combo_schedule.get().strip()
         start_date = self.calendar.get_date()
-
         try:
-            start_date_obj = datetime.strptime(start_date, "%m/%d/%Y")
-            formatted_start_date = start_date_obj.strftime("%Y/%m/%d")
-        except ValueError:
+            start_date_obj =  time.strptime(start_date, "%m/%d/%Y")
+            formatted_start_date = time.strftime("%Y/%m/%d", start_date_obj)
+        except Exception:
             self.status_label.configure(text="Invalid date format", text_color="red")
             return
 
         repeat_interval = self.entry_repeat.get().strip()
         selected_time = f"{self.hour_spin.get()}:{self.minute_spin.get()}"
-
         if not schedule or not selected_time:
             self.status_label.configure(text="Missing required fields!", text_color="red")
             return
@@ -358,21 +371,17 @@ class ScheduleFrame(ctk.CTkFrame):
         task_name = DEFAULT_TASK_NAME
         python_path = get_default_python_path()
         script_path = get_default_script_path()
-
         command = f'schtasks /create /tn "{task_name}" /tr "{python_path} {script_path}"'
         if schedule == "once":
             command += f' /sc once /st {selected_time} /sd {formatted_start_date}'
         else:
             command += f' /sc {schedule} /st {selected_time}'
-
         if repeat_interval:
             command += f' /ri {repeat_interval}'
-
         command += ' /rl highest /f'
-
         result = os.system(command)
         if result == 0:
-            self.status_label.configure(text=f"Backup Scheduled Successfully ", text_color="green")
+            self.status_label.configure(text="Backup Scheduled Successfully", text_color="green")
         else:
             self.status_label.configure(text="Backup scheduling failed. Check inputs and permissions.", text_color="red")
 
@@ -381,10 +390,215 @@ class ScheduleFrame(ctk.CTkFrame):
         command = f'schtasks /delete /tn "{task_name}" /f'
         result = os.system(command)
         if result == 0:
-            self.status_label.configure(text=f"Scheduled Backup Stopped", text_color="green")
+            self.status_label.configure(text="Scheduled Backup Stopped", text_color="green")
         else:
             self.status_label.configure(text="Invalid Input", text_color="red")
 
+# ---------------------------
+# New Browse & Restore Tab (Improved)
+# ---------------------------
+class BrowseRestoreFrame(ctk.CTkFrame):
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
+        self.create_widgets()
+        self.load_config()
+
+    def create_widgets(self):
+        # --- Credentials Section ---
+        cred_frame = ctk.CTkFrame(self)
+        cred_frame.pack(fill="x", padx=10, pady=5)
+        fields = [
+            ("AWS Access Key ID:", "entry_access", False),
+            ("AWS Secret Access Key:", "entry_secret", True),
+            ("S3 Bucket Name:", "entry_bucket", False),
+            ("Username:", "entry_computer_id", False)
+        ]
+        for idx, (label_text, attr, secret) in enumerate(fields):
+            ctk.CTkLabel(cred_frame, text=label_text).grid(row=idx, column=0, padx=5, pady=2, sticky="w")
+            entry = ctk.CTkEntry(cred_frame, show="*" if secret else "")
+            entry.grid(row=idx, column=1, padx=5, pady=2, sticky="ew")
+            setattr(self, attr, entry)
+        cred_frame.grid_columnconfigure(1, weight=1)
+
+        # --- Refresh Button ---
+        refresh_btn = ctk.CTkButton(self, text="Refresh File List", command=self.refresh_file_list)
+        refresh_btn.pack(padx=10, pady=5)
+
+        # --- Treeview for File List ---
+        tree_frame = ctk.CTkFrame(self)
+        tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # Configure a custom style for the Treeview using ttk.Style.
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Treeview",
+                        background="white",
+                        foreground="black",
+                        fieldbackground="white",
+                        rowheight=25,
+                        font=("Helvetica", 10))
+        style.configure("Treeview.Heading", font=("Helvetica", 11, "bold"))
+        style.map("Treeview", background=[("selected", "#347083")])
+
+        # Create Treeview with additional columns.
+        self.tree = ttk.Treeview(tree_frame,
+                                 columns=("Name", "Size", "Last Modified", "S3 Key"),
+                                 show="headings",
+                                 selectmode="extended")
+        self.tree.heading("Name", text="Name")
+        self.tree.heading("Size", text="Size (bytes)")
+        self.tree.heading("Last Modified", text="Last Modified")
+        self.tree.heading("S3 Key", text="S3 Key")
+        self.tree.column("Name", width=200, anchor="w")
+        self.tree.column("Size", width=100, anchor="center")
+        self.tree.column("Last Modified", width=150, anchor="center")
+        self.tree.column("S3 Key", width=300, anchor="w")
+        self.tree.pack(fill="both", expand=True)
+
+        # --- Restore Directory Selection ---
+        restore_frame = ctk.CTkFrame(self)
+        restore_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(restore_frame, text="Restore Directory:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        self.restore_dir_entry = ctk.CTkEntry(restore_frame)
+        self.restore_dir_entry.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
+        restore_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkButton(restore_frame, text="Browse", command=self.select_restore_dir).grid(row=0, column=2, padx=5, pady=2)
+
+        # --- Restore Button ---
+        restore_btn = ctk.CTkButton(self, text="Restore Selected Files", command=self.restore_selected_files)
+        restore_btn.pack(padx=10, pady=5)
+
+        # --- Progress Bar & Log ---
+        progress_frame = ctk.CTkFrame(self)
+        progress_frame.pack(fill="x", padx=10, pady=5)
+        self.progress_bar = ctk.CTkProgressBar(progress_frame, width=300)
+        self.progress_bar.grid(row=0, column=0, padx=(5, 2))
+        self.progress_bar.set(0)
+        self.progress_label = ctk.CTkLabel(progress_frame, text="0%")
+        self.progress_label.grid(row=0, column=1, padx=(2, 5))
+        self.log_text = scrolledtext.ScrolledText(self, height=10, state="disabled")
+        self.log_text.pack(fill="both", expand=True, padx=10, pady=5)
+
+    def load_config(self):
+        # Load configuration and pre-populate credential entries
+        config = configparser.ConfigParser()
+        if os.path.exists(CONFIG_FILE):
+            config.read(CONFIG_FILE)
+            if "Settings" in config:
+                settings = config["Settings"]
+                self.entry_access.insert(0, settings.get("aws_access_key", ""))
+                self.entry_secret.insert(0, settings.get("aws_secret_key", ""))
+                self.entry_bucket.insert(0, settings.get("bucket_name", ""))
+                self.entry_computer_id.insert(0, settings.get("computer_id", ""))
+                self.restore_dir_entry.insert(0, settings.get("restore_dir", ""))
+                self.log("Loaded configuration from file.")
+
+    def log(self, message):
+        self.log_text.config(state="normal")
+        self.log_text.insert("end", message + "\n")
+        self.log_text.see("end")
+        self.log_text.config(state="disabled")
+
+    def select_restore_dir(self):
+        directory = filedialog.askdirectory()
+        if directory:
+            self.restore_dir_entry.delete(0, "end")
+            self.restore_dir_entry.insert(0, directory)
+            self.log(f"Selected restore directory: {directory}")
+
+    def get_s3_client(self):
+        access_key = self.entry_access.get().strip()
+        secret_key = self.entry_secret.get().strip()
+        if not access_key or not secret_key:
+            messagebox.showerror("Error", "Please provide AWS credentials.")
+            return None
+        return boto3.client('s3', aws_access_key_id=access_key, aws_secret_access_key=secret_key)
+
+    def refresh_file_list(self):
+        s3 = self.get_s3_client()
+        if s3 is None:
+            return
+        bucket = self.entry_bucket.get().strip()
+        computer_folder = self.entry_computer_id.get().strip() or "Default"
+        prefix = f"backup/{computer_folder}/"
+        try:
+            paginator = s3.get_paginator('list_objects_v2')
+            self.tree.delete(*self.tree.get_children())  # Clear current list
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        key = obj['Key']
+                        size = obj['Size']
+                        # Format LastModified if available.
+                        last_modified = obj.get('LastModified')
+                        if last_modified:
+                            last_modified = last_modified.strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            last_modified = "N/A"
+                        # Extract file name from the key.
+                        name = os.path.basename(key)
+                        self.tree.insert("", "end", values=(name, size, last_modified, key))
+            self.log("File list refreshed.")
+        except Exception as e:
+            self.log(f"Error refreshing file list: {e}")
+
+    def update_progress(self, current, total):
+        progress_value = current / total if total > 0 else 0
+        self.progress_bar.set(progress_value)
+        percentage = int(progress_value * 100)
+        self.progress_label.configure(text=f"{percentage}%")
+        self.update_idletasks()
+
+    def restore_selected_files(self):
+        selected_items = self.tree.selection()
+        if not selected_items:
+            messagebox.showwarning("Warning", "No files selected for restore.")
+            return
+
+        restore_dir = self.restore_dir_entry.get().strip()
+        if not restore_dir:
+            messagebox.showerror("Error", "Please select a restore directory.")
+            return
+
+        s3 = self.get_s3_client()
+        if s3 is None:
+            return
+
+        bucket = self.entry_bucket.get().strip()
+        total_size = 0
+        files_to_restore = []
+        for item in selected_items:
+            name, size, last_modified, s3_key = self.tree.item(item, "values")
+            size = int(size)
+            total_size += size
+            files_to_restore.append((s3_key, size))
+
+        self.bytes_downloaded = 0
+        self.progress_bar.set(0)
+        self.progress_label.configure(text="0%")
+
+        def download_progress_callback(bytes_amount):
+            self.bytes_downloaded += bytes_amount
+            self.update_progress(self.bytes_downloaded, total_size)
+
+        def restore_thread():
+            for s3_key, size in files_to_restore:
+                rel_path = os.path.relpath(s3_key, f"backup/{self.entry_computer_id.get().strip() or 'Default'}")
+                local_path = os.path.join(restore_dir, rel_path)
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                try:
+                    s3.download_file(bucket, s3_key, local_path, Callback=download_progress_callback)
+                    self.log(f"Restored {s3_key} to {local_path}")
+                except Exception as e:
+                    self.log(f"Error restoring {s3_key}: {e}")
+            messagebox.showinfo("Restore", "Selected files have been restored.")
+
+        threading.Thread(target=restore_thread, daemon=True).start()
+
+
+# ---------------------------
+# Main Application Integration
+# ---------------------------
 class MainApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -393,7 +607,7 @@ class MainApp(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # Create tab view
+        # Create tab view and add tabs
         self.tab_view = ctk.CTkTabview(self)
         self.tab_view.pack(expand=True, fill="both", padx=10, pady=10)
 
@@ -406,6 +620,11 @@ class MainApp(ctk.CTk):
         self.tab_view.add("Schedule")
         self.schedule_tab = ScheduleFrame(self.tab_view.tab("Schedule"))
         self.schedule_tab.pack(expand=True, fill="both")
+
+        # Browse & Restore Tab
+        self.tab_view.add("Browse & Restore")
+        self.browse_restore_tab = BrowseRestoreFrame(self.tab_view.tab("Browse & Restore"))
+        self.browse_restore_tab.pack(expand=True, fill="both")
 
 if __name__ == "__main__":
     app = MainApp()
