@@ -11,6 +11,8 @@ from tkinter import filedialog, messagebox, scrolledtext
 from tkinter import ttk
 from tkcalendar import Calendar
 import customtkinter as ctk
+from zoneinfo import ZoneInfo
+from datetime import datetime
 
 # Constants
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
@@ -33,7 +35,7 @@ def compute_md5(file_path):
     return hash_md5.hexdigest()
 
 # ---------------------------
-# Existing Backup Tab
+# Backup Tab
 # ---------------------------
 class BackupFrame(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
@@ -181,8 +183,8 @@ class BackupFrame(ctk.CTkFrame):
                     self.bytes_uploaded += os.path.getsize(full_path)
                     self.update_progress(self.bytes_uploaded, self.total_size)
                     continue
-            except Exception as e:
-                # Continue if file not found
+            except Exception:
+                # If file not found, we just upload
                 pass
 
             try:
@@ -288,7 +290,7 @@ class BackupFrame(ctk.CTkFrame):
                 self.entry_computer_id.insert(0, settings.get("computer_id", ""))
                 self.backup_dir_entry.insert(0, settings.get("backup_dir", ""))
                 self.restore_dir_entry.insert(0, settings.get("restore_dir", ""))
-                self.log("Loaded configuration from file")
+                self.log("Loaded configuration from file.")
 
     def save_config(self):
         config = configparser.ConfigParser()
@@ -306,7 +308,7 @@ class BackupFrame(ctk.CTkFrame):
         messagebox.showinfo("Success", "Settings saved successfully")
 
 # ---------------------------
-# Existing Schedule Tab
+# Schedule Tab (XML-based, AC power disabled, separate paths)
 # ---------------------------
 class ScheduleFrame(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
@@ -353,49 +355,143 @@ class ScheduleFrame(ctk.CTkFrame):
         self.status_label.grid(row=5, column=0, columnspan=3, pady=10)
 
     def create_task(self):
+        # Gather scheduling info
         schedule = self.combo_schedule.get().strip()
         start_date = self.calendar.get_date()
-        try:
-            start_date_obj =  time.strptime(start_date, "%m/%d/%Y")
-            formatted_start_date = time.strftime("%Y/%m/%d", start_date_obj)
-        except Exception:
-            self.status_label.configure(text="Invalid date format", text_color="red")
-            return
-
-        repeat_interval = self.entry_repeat.get().strip()
         selected_time = f"{self.hour_spin.get()}:{self.minute_spin.get()}"
+        repeat_interval = self.entry_repeat.get().strip()
+
         if not schedule or not selected_time:
             self.status_label.configure(text="Missing required fields!", text_color="red")
             return
 
-        task_name = DEFAULT_TASK_NAME
+        # Combine date/time
+        try:
+            start_dt = datetime.strptime(f"{start_date} {selected_time}", "%m/%d/%Y %H:%M")
+        except Exception:
+            self.status_label.configure(text="Invalid date/time format", text_color="red")
+            return
+
+        start_boundary = start_dt.isoformat()
+
+        # Get paths
         python_path = get_default_python_path()
         script_path = get_default_script_path()
-        command = f'schtasks /create /tn "{task_name}" /tr "{python_path} {script_path}"'
+
+        # Quote them so Task Scheduler sees them separately
+        python_cmd = f"{python_path}"
+        script_arg = f"{script_path}"
+
+        # Build XML
+        xml = f'''<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Date>{datetime.now().isoformat()}</Date>
+    <Author>{os.getlogin()}</Author>
+    <Description>S3 Backup Job</Description>
+  </RegistrationInfo>
+  <Triggers>
+'''
         if schedule == "once":
-            command += f' /sc once /st {selected_time} /sd {formatted_start_date}'
+            xml += f'''    <TimeTrigger>
+      <StartBoundary>{start_boundary}</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+'''
+        elif schedule == "daily":
+            xml += f'''    <CalendarTrigger>
+      <StartBoundary>{start_boundary}</StartBoundary>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+      <Enabled>true</Enabled>
+    </CalendarTrigger>
+'''
+        elif schedule in ["weekly", "monthly"]:
+            # Extend or customize if needed
+            self.status_label.configure(
+                text="Weekly/Monthly triggers not fully implemented. Extend XML as needed.",
+                text_color="red"
+            )
+            return
         else:
-            command += f' /sc {schedule} /st {selected_time}'
-        if repeat_interval:
-            command += f' /ri {repeat_interval}'
-        command += ' /rl highest /f'
+            self.status_label.configure(text="Unrecognized schedule.", text_color="red")
+            return
+
+        xml += f'''  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>
+      {python_cmd}</Command>
+      <Arguments>{script_arg}</Arguments>
+    </Exec>
+  </Actions>
+</Task>'''
+
+        # Write XML to a temporary file
+        temp_xml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_task.xml")
+        try:
+            with open(temp_xml_path, "w", encoding="utf-16") as f:
+                f.write(xml)
+        except Exception as e:
+            self.status_label.configure(text=f"Error writing XML file: {e}", text_color="red")
+            return
+
+        # Run schtasks with the XML
+        command = f'schtasks /create /tn "{DEFAULT_TASK_NAME}" /xml "{temp_xml_path}" /f'
         result = os.system(command)
         if result == 0:
-            self.status_label.configure(text="Backup Scheduled Successfully", text_color="green")
+            self.status_label.configure(
+                text="Backup Scheduled Successfully (will run on battery, paths shown separately)",
+                text_color="green"
+            )
         else:
-            self.status_label.configure(text="Backup scheduling failed. Check inputs and permissions.", text_color="red")
+            self.status_label.configure(
+                text="Backup scheduling failed. Check inputs and permissions.",
+                text_color="red"
+            )
+
+        # Clean up temporary XML
+        try:
+            os.remove(temp_xml_path)
+        except Exception:
+            pass
 
     def remove_task(self):
-        task_name = DEFAULT_TASK_NAME
-        command = f'schtasks /delete /tn "{task_name}" /f'
+        command = f'schtasks /delete /tn "{DEFAULT_TASK_NAME}" /f'
         result = os.system(command)
         if result == 0:
             self.status_label.configure(text="Scheduled Backup Stopped", text_color="green")
         else:
-            self.status_label.configure(text="Invalid Input", text_color="red")
+            self.status_label.configure(text="Failed to remove the scheduled task.", text_color="red")
 
 # ---------------------------
-# New Browse & Restore Tab (Improved)
+# Browse & Restore Tab
 # ---------------------------
 class BrowseRestoreFrame(ctk.CTkFrame):
     def __init__(self, master, **kwargs):
@@ -404,7 +500,7 @@ class BrowseRestoreFrame(ctk.CTkFrame):
         self.load_config()
 
     def create_widgets(self):
-        # --- Credentials Section ---
+        # Credentials Section
         cred_frame = ctk.CTkFrame(self)
         cred_frame.pack(fill="x", padx=10, pady=5)
         fields = [
@@ -420,15 +516,14 @@ class BrowseRestoreFrame(ctk.CTkFrame):
             setattr(self, attr, entry)
         cred_frame.grid_columnconfigure(1, weight=1)
 
-        # --- Refresh Button ---
+        # Refresh Button
         refresh_btn = ctk.CTkButton(self, text="Refresh File List", command=self.refresh_file_list)
         refresh_btn.pack(padx=10, pady=5)
 
-        # --- Treeview for File List ---
+        # Treeview for File List
         tree_frame = ctk.CTkFrame(self)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
-        # Configure a custom style for the Treeview using ttk.Style.
         style = ttk.Style()
         style.theme_use("clam")
         style.configure("Treeview",
@@ -440,7 +535,6 @@ class BrowseRestoreFrame(ctk.CTkFrame):
         style.configure("Treeview.Heading", font=("Helvetica", 11, "bold"))
         style.map("Treeview", background=[("selected", "#347083")])
 
-        # Create Treeview with additional columns.
         self.tree = ttk.Treeview(tree_frame,
                                  columns=("Name", "Size", "Last Modified", "S3 Key"),
                                  show="headings",
@@ -455,7 +549,7 @@ class BrowseRestoreFrame(ctk.CTkFrame):
         self.tree.column("S3 Key", width=300, anchor="w")
         self.tree.pack(fill="both", expand=True)
 
-        # --- Restore Directory Selection ---
+        # Restore Directory Selection
         restore_frame = ctk.CTkFrame(self)
         restore_frame.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(restore_frame, text="Restore Directory:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
@@ -464,11 +558,11 @@ class BrowseRestoreFrame(ctk.CTkFrame):
         restore_frame.grid_columnconfigure(1, weight=1)
         ctk.CTkButton(restore_frame, text="Browse", command=self.select_restore_dir).grid(row=0, column=2, padx=5, pady=2)
 
-        # --- Restore Button ---
+        # Restore Button
         restore_btn = ctk.CTkButton(self, text="Restore Selected Files", command=self.restore_selected_files)
         restore_btn.pack(padx=10, pady=5)
 
-        # --- Progress Bar & Log ---
+        # Progress Bar & Log
         progress_frame = ctk.CTkFrame(self)
         progress_frame.pack(fill="x", padx=10, pady=5)
         self.progress_bar = ctk.CTkProgressBar(progress_frame, width=300)
@@ -480,7 +574,6 @@ class BrowseRestoreFrame(ctk.CTkFrame):
         self.log_text.pack(fill="both", expand=True, padx=10, pady=5)
 
     def load_config(self):
-        # Load configuration and pre-populate credential entries
         config = configparser.ConfigParser()
         if os.path.exists(CONFIG_FILE):
             config.read(CONFIG_FILE)
@@ -523,19 +616,18 @@ class BrowseRestoreFrame(ctk.CTkFrame):
         prefix = f"backup/{computer_folder}/"
         try:
             paginator = s3.get_paginator('list_objects_v2')
-            self.tree.delete(*self.tree.get_children())  # Clear current list
+            self.tree.delete(*self.tree.get_children())
             for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
                 if 'Contents' in page:
                     for obj in page['Contents']:
                         key = obj['Key']
                         size = obj['Size']
-                        # Format LastModified if available.
                         last_modified = obj.get('LastModified')
                         if last_modified:
-                            last_modified = last_modified.strftime("%Y-%m-%d %H:%M:%S")
+                            local_time = last_modified.astimezone(ZoneInfo("America/Toronto"))
+                            last_modified = local_time.strftime("%Y-%m-%d %H:%M:%S")
                         else:
                             last_modified = "N/A"
-                        # Extract file name from the key.
                         name = os.path.basename(key)
                         self.tree.insert("", "end", values=(name, size, last_modified, key))
             self.log("File list refreshed.")
@@ -583,7 +675,10 @@ class BrowseRestoreFrame(ctk.CTkFrame):
 
         def restore_thread():
             for s3_key, size in files_to_restore:
-                rel_path = os.path.relpath(s3_key, f"backup/{self.entry_computer_id.get().strip() or 'Default'}")
+                # Reconstruct local path
+                rel_path = os.path.relpath(
+                    s3_key, f"backup/{self.entry_computer_id.get().strip() or 'Default'}"
+                )
                 local_path = os.path.join(restore_dir, rel_path)
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
                 try:
@@ -595,9 +690,8 @@ class BrowseRestoreFrame(ctk.CTkFrame):
 
         threading.Thread(target=restore_thread, daemon=True).start()
 
-
 # ---------------------------
-# Main Application Integration
+# Main Application
 # ---------------------------
 class MainApp(ctk.CTk):
     def __init__(self):
@@ -607,7 +701,6 @@ class MainApp(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # Create tab view and add tabs
         self.tab_view = ctk.CTkTabview(self)
         self.tab_view.pack(expand=True, fill="both", padx=10, pady=10)
 
