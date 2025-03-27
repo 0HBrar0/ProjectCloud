@@ -343,10 +343,6 @@ class ScheduleFrame(ctk.CTkFrame):
         self.calendar = Calendar(main_frame, date_pattern='mm/dd/yyyy')
         self.calendar.grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
-        # Repeat Interval
-        ctk.CTkLabel(main_frame, text="Repeat Interval (minutes):").grid(row=3, column=0, padx=5, pady=5, sticky="w")
-        self.entry_repeat = ctk.CTkEntry(main_frame, width=100)
-        self.entry_repeat.grid(row=3, column=1, padx=5, pady=5, sticky="w")
 
         # Buttons
         btn_frame = ctk.CTkFrame(main_frame)
@@ -362,7 +358,6 @@ class ScheduleFrame(ctk.CTkFrame):
         schedule = self.combo_schedule.get().strip()
         start_date = self.calendar.get_date()
         selected_time = f"{self.hour_spin.get()}:{self.minute_spin.get()}"
-        repeat_interval = self.entry_repeat.get().strip()
 
         if not schedule or not selected_time:
             self.status_label.configure(text="Missing required fields!", text_color="red")
