@@ -58,6 +58,7 @@ class BackupFrame(ctk.CTkFrame):
         # Credentials
         cred_frame = ctk.CTkFrame(main_frame)
         cred_frame.grid(row=0, column=0, pady=5, padx=5, sticky="ew")
+        cred_frame.grid_columnconfigure(1, weight=1)
         fields = [
             ("AWS Access Key ID:", "entry_access", False),
             ("AWS Secret Access Key:", "entry_secret", True),
@@ -73,6 +74,8 @@ class BackupFrame(ctk.CTkFrame):
         # Directories
         dir_frame = ctk.CTkFrame(main_frame)
         dir_frame.grid(row=1, column=0, pady=5, padx=5, sticky="ew")
+        dir_frame.grid_columnconfigure(1, weight=1)
+
         dirs = [
             ("Local Backup Directory:", "backup_dir_entry", self.select_backup_dir),
             ("Local Restore Directory:", "restore_dir_entry", self.select_restore_dir)
@@ -328,9 +331,9 @@ class ScheduleFrame(ctk.CTkFrame):
 
         # Time
         ctk.CTkLabel(main_frame, text="Schedule Time (HH:MM):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.hour_spin = tk.Spinbox(main_frame, from_=0, to=23, width=5)
+        self.hour_spin = tk.Spinbox(main_frame, from_=0, to=23, width=5, font=("Helvetica", 16))
         self.hour_spin.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        self.minute_spin = tk.Spinbox(main_frame, from_=0, to=59, width=5)
+        self.minute_spin = tk.Spinbox(main_frame, from_=0, to=59, width=5, font=("Helvetica", 16))
         self.minute_spin.grid(row=0, column=2, padx=5, pady=5, sticky="w")
 
         # Frequency
